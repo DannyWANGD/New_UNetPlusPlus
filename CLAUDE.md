@@ -396,13 +396,25 @@ out_mlka = model_mlka(x)
 | seg_outputs 构建 | `self.loc*[-1][-1].output_channels` | **不变**（MLKABlock 暴露 output_channels） |
 | 向后兼容 | — | `use_mlka=False` 完全恢复原行为 |
 
-### 8. 已知限制与后续扩展
+### 8. 改动一限制与实验边界
 
-| 限制 | 说明 | 扩展方案 |
-|------|------|----------|
-| **仅支持 2D** | `MAN_arch.py` 全系使用 `nn.Conv2d`，无法直接用于 3D fullres | 需实现 Conv3d 版 MLKA：Conv2d→Conv3d, InstanceNorm2d→InstanceNorm3d, kernel 适配 3D（如 (3,7,7)） |
-| **依赖 conv_upsampling=True** | `final_num_features = nfeatures_from_skip` 保证第二步为 C_i→C_i | 若需支持 conv_upsampling=False，修改 MLKABlock 签名支持 `MLKABlock(in_ch, out_ch)`，末尾加 1×1 projection |
-| **需独立 Trainer** | `use_mlka` 默认为 False，原 trainer 不传此参数 | 需创建 `nnUNetPlusPlusTrainerV2_MLKA` 并显式传入 `use_mlka=True` |
+| 类别 | 当前边界 | 已验证行为 | 后续扩展方案 |
+|------|----------|----------|--------------|
+| **维度** | 仅支持 2D。`MAN_arch.py` 与当前 `MLKABlock` 均基于 `nn.Conv2d` / `InstanceNorm2d` | `conv_op=nn.Conv3d` 时主动抛出 `NotImplementedError` | 实现 Conv3d 版 MLKA：Conv2d→Conv3d, InstanceNorm2d→InstanceNorm3d, kernel 适配 3D（如 `(3,7,7)`） |
+| **上采样方式** | 仅支持 `convolutional_upsampling=True` | `convolutional_upsampling=False` 时主动抛出 `NotImplementedError` | 若需支持非卷积上采样，修改为 `MLKABlock(in_ch, out_ch)`，末尾加 1×1 projection |
+| **通道数** | `GroupGLKA` 固定 3 分支，要求所有 MLKA 节点通道 `C_i % 3 == 0` 且 `C_i / 3 >= 8`。当前实验限定 `base_num_features=30`，对应节点通道 `30, 60, 120, 240, 480` | `base_num_features=30` 通过；`base_num_features=32` 会报 `ValueError: channels must be divisible by num_groups` | 支持 32 等配置时，改为动态分支版 MLKA，或在 MLKA 前后增加通道对齐/投影层 |
+| **拓扑深度** | 当前 `forward()` 是固定 5-pool UNet++ 显式拓扑 | 已按 `num_pool=5` 验证 15 个嵌套节点均为 `MLKABlock` | 如需 `num_pool != 5`，需重写 forward 为循环式拓扑或补齐显式节点 |
+| **Trainer** | 原始 `nnUNetPlusPlusTrainerV2` 保持 baseline；MLKA 使用独立 `nnUNetPlusPlusTrainerV2_MLKA` | 新 trainer 显式传入 `use_mlka=True, mlka_groups=3, mlka_norm='instance'` | 后续消融可新增不同 trainer 或参数化 `mlka_norm` / `mlka_groups` |
+| **归一化** | 默认 `mlka_norm='instance'`，与当前 2D trainer 的 `InstanceNorm2d` 对齐 | `instance` / `batch` / `layer` 的模块级前后向均通过 | 用独立实验比较不同归一化，不混入主实验 |
+| **环境依赖** | 完整 nnU-Net 训练需要 `batchgenerators` 等依赖；本地 `d2l` 环境当前缺少完整训练依赖 | 网络级验证通过；完整 trainer 导入会受缺失依赖影响 | 在 GPU 实验环境中安装仓库依赖并设置 `PYTHONPATH` / nnU-Net 数据路径 |
+
+**已代入验证的网络案例**：
+
+| 案例 | 结论 |
+|------|------|
+| `use_mlka=False` vs 当前 baseline，输入 `(1,3,64,64)`、`(2,3,96,128)` | 输出最大差值 0，`state_dict` keys 一致 |
+| `use_mlka=True, base_num_features=30`，输入 `(1,3,64,64)`、`(2,3,96,128)`、`(1,3,128,96)` | 5 个深监督输出 shape 与 baseline 一致，15 个嵌套节点均为 `MLKABlock`，反向传播梯度正常 |
+| 错误配置：`base_num_features=32`、`convolutional_upsampling=False`、`conv_op=nn.Conv3d` | 均按预期失败，错误原因明确 |
 
 ### 9. 改动一 Todo List
 
@@ -413,9 +425,9 @@ out_mlka = model_mlka(x)
 | 为 `MLKABlock` 增加 `output_channels` | ✅ | `seg_outputs` 可正常构建，无 AttributeError |
 | 在 `Generic_UNetPlusPlus.__init__()` 末尾追加 MLKA 参数 | ✅ | `use_mlka=False` 默认保持旧行为，位置参数调用不受影响 |
 | 改造 `create_nest()` 条件分支 | ✅ | `use_mlka=True` 时第二步为 `MLKABlock(C_i)`；`False` 时保留原始 `final_num_features` 逻辑 |
-| 创建 `nnUNetPlusPlusTrainerV2_MLKA` | ⬜ | 独立 trainer 显式传入 `use_mlka=True, mlka_norm='instance'` |
-| 随机张量前向/反向验证 | ⬜ | `num_pool=5, base_num_features=30, 2D, conv_upsampling=True` 下输出 shape 与 baseline 一致 |
-| baseline 兼容性验证 | ⬜ | `use_mlka=False` 在相同随机种子下与原始网络结构/输出一致 |
+| 创建 `nnUNetPlusPlusTrainerV2_MLKA` | ✅ | 独立 trainer 显式传入 `use_mlka=True, mlka_norm='instance'` |
+| 随机张量前向/反向验证 | ✅ | `num_pool=5, base_num_features=30, 2D, conv_upsampling=True` 下输出 shape 与 baseline 一致；`base_num_features=32` 不属于当前改动一支持范围 |
+| baseline 兼容性验证 | ✅ | `use_mlka=False` 在相同随机种子下与原始网络结构/输出一致；已对 `(1,3,64,64)` 和 `(2,3,96,128)` 验证最大差值为 0 |
 | 参数量与显存记录 | ⬜ | 记录 baseline 与 MLKA 版本的参数量、显存峰值、单次 forward 时间 |
 
 ---
@@ -482,8 +494,7 @@ GSAU 仅作用于主跳跃连接（编码器特征 x^{i,0}），密集路径中�
 
 ### 测试要求
 - 每次改动后运行：实例化网络 → 随机输入前向传播 → 反向传播 → 检查梯度非 None
-- 当前 `forward()` 固定为 5-pool UNet++ 拓扑，因此先仅验证 `num_pool=5`
-- 验证 `base_num_features` 选择可被 3 整除且每组不少于 8 通道的配置，如 24、30、48
+- 当前支持范围与已验证案例见“改动一限制与实验边界”章节
 
 ---
 
@@ -494,8 +505,8 @@ GSAU 仅作用于主跳跃连接（编码器特征 x^{i,0}），密集路径中�
 | 改动一：创建 custom_modules/mlka.py | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 可配置 Norm + GroupGLKA + MLKABlock，已包含 output_channels |
 | 改动一：generic_UNetPlusPlus.py 导入与参数 | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 已追加 use_mlka, mlka_groups, mlka_norm，并加入 MLKABlock 导入 |
 | 改动一：create_nest 条件分支改造 | ✅ 已完成 | 2026-05-25 | 2026-05-25 | `use_mlka=True` 时第二步 C_i→C_i 使用 MLKABlock |
-| 改动一：创建 nnUNetPlusPlusTrainerV2_MLKA | ⬜ 待开始 | — | — | 独立 trainer，传入 use_mlka=True |
-| 改动一：前后向兼容性验证 | ⬜ 待开始 | — | — | use_mlka=False 输出一致 + output_channels 正常 |
+| 改动一：创建 nnUNetPlusPlusTrainerV2_MLKA | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 独立 trainer，传入 use_mlka=True |
+| 改动一：前后向兼容性验证 | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 已验证 baseline 数值一致、MLKA 多尺寸前后向、错误配置保护 |
 | 改动二：创建 custom_modules/gsau.py | ⬜ 待开始 | — | — | GSAU + SGAB |
 | 改动二：forward 方法 GSAU 插入 | ⬜ 待开始 | — | — | 方案 A，仅作用于 x^{i,0} |
 | 改动二：独立开关验证 | ⬜ 待开始 | — | — | |
@@ -514,5 +525,4 @@ GSAU 仅作用于主跳跃连接（编码器特征 x^{i,0}），密集路径中�
 4. **不修改 MAN_arch.py**：该文件作为参考实现保留不动。所需模块提取到 `custom_modules/` 后独立维护。
 5. **nnU-Net 的 `deep_supervision` 参数**：改动不得影响 `_deep_supervision` 和 `do_ds` 的逻辑流程。
 6. **MLKABlock 必须有 `output_channels` 属性**：`Generic_UNetPlusPlus.__init__()` 在构建 `seg_outputs` 时依赖 `self.loc*[-1][-1].output_channels`（L348-L357），缺失会导致 AttributeError。
-7. **三分支通道限制**：当前 MLKA 复用 MAN GroupGLKA 的三分支结构，要求 `C_i % 3 == 0` 且每组不少于 8 通道。默认 `30, 60, 120, 240, 480` 满足要求；`base_num_features=32` 暂不支持。
-8. **2D 限定**：当前所有 MLKA 模块基于 `nn.Conv2d`，不可直接用于 3D 网络。
+7. **实验边界集中维护**：2D、`convolutional_upsampling=True`、`base_num_features=30`、`num_pool=5` 等限制统一以“改动一限制与实验边界”章节为准。
