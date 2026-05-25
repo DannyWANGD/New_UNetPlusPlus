@@ -412,7 +412,7 @@ out_mlka = model_mlka(x)
 | 创建 `custom_modules/mlka.py` | ✅ | 提取并适配 GroupGLKA，默认 `InstanceNorm2d`，无 sigmoid gate |
 | 为 `MLKABlock` 增加 `output_channels` | ✅ | `seg_outputs` 可正常构建，无 AttributeError |
 | 在 `Generic_UNetPlusPlus.__init__()` 末尾追加 MLKA 参数 | ✅ | `use_mlka=False` 默认保持旧行为，位置参数调用不受影响 |
-| 改造 `create_nest()` 条件分支 | ⬜ | `use_mlka=True` 时第二步为 `MLKABlock(C_i)`；`False` 时保留原始 `final_num_features` 逻辑 |
+| 改造 `create_nest()` 条件分支 | ✅ | `use_mlka=True` 时第二步为 `MLKABlock(C_i)`；`False` 时保留原始 `final_num_features` 逻辑 |
 | 创建 `nnUNetPlusPlusTrainerV2_MLKA` | ⬜ | 独立 trainer 显式传入 `use_mlka=True, mlka_norm='instance'` |
 | 随机张量前向/反向验证 | ⬜ | `num_pool=5, base_num_features=30, 2D, conv_upsampling=True` 下输出 shape 与 baseline 一致 |
 | baseline 兼容性验证 | ⬜ | `use_mlka=False` 在相同随机种子下与原始网络结构/输出一致 |
@@ -492,8 +492,8 @@ GSAU 仅作用于主跳跃连接（编码器特征 x^{i,0}），密集路径中�
 | 任务 | 状态 | 开始日期 | 完成日期 | 备注 |
 |------|:----:|----------|----------|------|
 | 改动一：创建 custom_modules/mlka.py | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 可配置 Norm + GroupGLKA + MLKABlock，已包含 output_channels |
-| 改动一：generic_UNetPlusPlus.py 导入与参数 | 🔄 进行中 | 2026-05-25 | — | 已追加 use_mlka, mlka_groups, mlka_norm；待加入 MLKABlock 导入 |
-| 改动一：create_nest 条件分支改造 | ⬜ 待开始 | — | — | L466-473，第二步 C_i→C_i |
+| 改动一：generic_UNetPlusPlus.py 导入与参数 | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 已追加 use_mlka, mlka_groups, mlka_norm，并加入 MLKABlock 导入 |
+| 改动一：create_nest 条件分支改造 | ✅ 已完成 | 2026-05-25 | 2026-05-25 | `use_mlka=True` 时第二步 C_i→C_i 使用 MLKABlock |
 | 改动一：创建 nnUNetPlusPlusTrainerV2_MLKA | ⬜ 待开始 | — | — | 独立 trainer，传入 use_mlka=True |
 | 改动一：前后向兼容性验证 | ⬜ 待开始 | — | — | use_mlka=False 输出一致 + output_channels 正常 |
 | 改动二：创建 custom_modules/gsau.py | ⬜ 待开始 | — | — | GSAU + SGAB |

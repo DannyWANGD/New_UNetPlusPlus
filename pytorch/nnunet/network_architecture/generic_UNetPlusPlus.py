@@ -19,6 +19,7 @@ from torch import nn
 import torch
 import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
+from nnunet.network_architecture.custom_modules.mlka import MLKABlock
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 import torch.nn.functional
 
@@ -338,16 +339,21 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
         # now lets build the localization pathway
         encoder_features = final_num_features
-        self.loc0, self.up0, encoder_features = self.create_nest(0, num_pool, final_num_features, num_conv_per_stage,
-                                                                 basic_block, transpconv)
-        self.loc1, self.up1, encoder_features1 = self.create_nest(1, num_pool, encoder_features, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc2, self.up2, encoder_features2 = self.create_nest(2, num_pool, encoder_features1, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc3, self.up3, encoder_features3 = self.create_nest(3, num_pool, encoder_features2, num_conv_per_stage,
-                                                                  basic_block, transpconv)
-        self.loc4, self.up4, encoder_features4 = self.create_nest(4, num_pool, encoder_features3, num_conv_per_stage,
-                                                                  basic_block, transpconv)
+        self.loc0, self.up0, encoder_features = self.create_nest(
+            0, num_pool, final_num_features, num_conv_per_stage, basic_block, transpconv,
+            use_mlka=self.use_mlka, mlka_groups=self.mlka_groups, mlka_norm=self.mlka_norm)
+        self.loc1, self.up1, encoder_features1 = self.create_nest(
+            1, num_pool, encoder_features, num_conv_per_stage, basic_block, transpconv,
+            use_mlka=self.use_mlka, mlka_groups=self.mlka_groups, mlka_norm=self.mlka_norm)
+        self.loc2, self.up2, encoder_features2 = self.create_nest(
+            2, num_pool, encoder_features1, num_conv_per_stage, basic_block, transpconv,
+            use_mlka=self.use_mlka, mlka_groups=self.mlka_groups, mlka_norm=self.mlka_norm)
+        self.loc3, self.up3, encoder_features3 = self.create_nest(
+            3, num_pool, encoder_features2, num_conv_per_stage, basic_block, transpconv,
+            use_mlka=self.use_mlka, mlka_groups=self.mlka_groups, mlka_norm=self.mlka_norm)
+        self.loc4, self.up4, encoder_features4 = self.create_nest(
+            4, num_pool, encoder_features3, num_conv_per_stage, basic_block, transpconv,
+            use_mlka=self.use_mlka, mlka_groups=self.mlka_groups, mlka_norm=self.mlka_norm)
 
         self.seg_outputs.append(conv_op(self.loc0[-1][-1].output_channels, num_classes,
                                         1, 1, 0, 1, 1, seg_output_use_bias))
@@ -437,7 +443,8 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
             return seg_outputs[-1]
 
     # now lets build the localization pathway BACK_UP
-    def create_nest(self, z, num_pool, final_num_features, num_conv_per_stage, basic_block, transpconv):
+    def create_nest(self, z, num_pool, final_num_features, num_conv_per_stage,
+                    basic_block, transpconv, use_mlka=False, mlka_groups=3, mlka_norm='instance'):
         # print(final_num_features)
         conv_blocks_localization = []
         tu = []
@@ -467,14 +474,24 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
 
             self.conv_kwargs['kernel_size'] = self.conv_kernel_sizes[- (u + 1)]
             self.conv_kwargs['padding'] = self.conv_pad_sizes[- (u + 1)]
-            conv_blocks_localization.append(nn.Sequential(
-                StackedConvLayers(n_features_after_tu_and_concat, nfeatures_from_skip, num_conv_per_stage - 1,
-                                  self.conv_op, self.conv_kwargs, self.norm_op, self.norm_op_kwargs, self.dropout_op,
-                                  self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs, basic_block=basic_block),
-                StackedConvLayers(nfeatures_from_skip, final_num_features, 1, self.conv_op, self.conv_kwargs,
-                                  self.norm_op, self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs,
-                                  self.nonlin, self.nonlin_kwargs, basic_block=basic_block)
-            ))
+            reduction = StackedConvLayers(n_features_after_tu_and_concat, nfeatures_from_skip,
+                                          num_conv_per_stage - 1, self.conv_op, self.conv_kwargs, self.norm_op,
+                                          self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs, self.nonlin,
+                                          self.nonlin_kwargs, basic_block=basic_block)
+
+            if use_mlka:
+                if not self.convolutional_upsampling:
+                    raise NotImplementedError("MLKA refinement currently requires convolutional_upsampling=True.")
+                if self.conv_op != nn.Conv2d:
+                    raise NotImplementedError("MLKA refinement currently supports 2D Conv2d only.")
+                refinement = MLKABlock(nfeatures_from_skip, num_groups=mlka_groups, norm_type=mlka_norm)
+            else:
+                refinement = StackedConvLayers(nfeatures_from_skip, final_num_features, 1, self.conv_op,
+                                               self.conv_kwargs, self.norm_op, self.norm_op_kwargs, self.dropout_op,
+                                               self.dropout_op_kwargs, self.nonlin, self.nonlin_kwargs,
+                                               basic_block=basic_block)
+
+            conv_blocks_localization.append(nn.Sequential(reduction, refinement))
             # print(final_num_features)
         # print('hello')
         return conv_blocks_localization, tu, unet_final_features
