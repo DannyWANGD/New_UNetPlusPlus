@@ -190,7 +190,7 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
                  conv_kernel_sizes=None,
                  upscale_logits=False, convolutional_pooling=False, convolutional_upsampling=False,
                  max_num_features=None, basic_block=ConvDropoutNormNonlin,
-                 seg_output_use_bias=False):
+                 seg_output_use_bias=False, use_mlka=False, mlka_groups=3, mlka_norm='instance'):
         """
         basically more flexible than v1, architecture is the same
 
@@ -204,6 +204,9 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         self.convolutional_upsampling = convolutional_upsampling
         self.convolutional_pooling = convolutional_pooling
         self.upscale_logits = upscale_logits
+        self.use_mlka = use_mlka
+        self.mlka_groups = mlka_groups
+        self.mlka_norm = mlka_norm
         if nonlin_kwargs is None:
             nonlin_kwargs = {'negative_slope': 1e-2, 'inplace': True}
         if dropout_op_kwargs is None:
