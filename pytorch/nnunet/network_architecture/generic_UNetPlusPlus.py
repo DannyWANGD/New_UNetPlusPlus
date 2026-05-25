@@ -245,6 +245,7 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         else:
             raise ValueError("unknown convolution dimensionality, conv op: %s" % str(conv_op))
 
+        self.upsample_mode = upsample_mode
         self.input_shape_must_be_divisible_by = np.prod(pool_op_kernel_sizes, 0, dtype=np.int64)
         self.pool_op_kernel_sizes = pool_op_kernel_sizes
         self.conv_kernel_sizes = conv_kernel_sizes
