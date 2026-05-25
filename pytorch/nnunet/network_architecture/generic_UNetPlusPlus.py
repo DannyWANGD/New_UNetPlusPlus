@@ -394,9 +394,10 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
     def forward(self, x):
         # skips = []
         seg_outputs = []
-        x0_0 = self.conv_blocks_context[0](x)
-        x1_0 = self.conv_blocks_context[1](x0_0)
-        x0_1 = self.loc4[0](torch.cat([x0_0, self.up4[0](x1_0)], 1))
+        x0_0 = self.conv_blocks_context[0](x) # x0_0的维度是（B,C,H,W）
+        x1_0 = self.conv_blocks_context[1](x0_0) # x1_0的维度是（B,C,H/2,W/2）
+        # self.up4[0](x1_0)的维度是（B,C,H,W），所以torch.cat([x0_0, self.up4[0](x1_0)], 1)的维度是（B,2C,H,W），经过self.loc4[0]后x0_1的维度又变成了（B,C,H,W）
+        x0_1 = self.loc4[0](torch.cat([x0_0, self.up4[0](x1_0)], 1)) 
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-1](x0_1)))
 
         x2_0 = self.conv_blocks_context[2](x1_0)
