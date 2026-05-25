@@ -408,9 +408,9 @@ out_mlka = model_mlka(x)
 
 | 任务 | 状态 | 目标/验收 |
 |------|:---:|----------|
-| 修正 `generic_UNetPlusPlus.py` 中 `self.upsample_mode` 未赋值问题 | ⬜ | 在 `__init__()` 中保存 `self.upsample_mode = upsample_mode`，避免非卷积上采样路径潜在报错 |
-| 创建 `custom_modules/mlka.py` | ⬜ | 提取并适配 GroupGLKA，默认 `InstanceNorm2d`，无 sigmoid gate |
-| 为 `MLKABlock` 增加 `output_channels` | ⬜ | `seg_outputs` 可正常构建，无 AttributeError |
+| 修正 `generic_UNetPlusPlus.py` 中 `self.upsample_mode` 未赋值问题 | ✅ | 在 `__init__()` 中保存 `self.upsample_mode = upsample_mode`，避免非卷积上采样路径潜在报错 |
+| 创建 `custom_modules/mlka.py` | ✅ | 提取并适配 GroupGLKA，默认 `InstanceNorm2d`，无 sigmoid gate |
+| 为 `MLKABlock` 增加 `output_channels` | ✅ | `seg_outputs` 可正常构建，无 AttributeError |
 | 在 `Generic_UNetPlusPlus.__init__()` 末尾追加 MLKA 参数 | ⬜ | `use_mlka=False` 默认保持旧行为，位置参数调用不受影响 |
 | 改造 `create_nest()` 条件分支 | ⬜ | `use_mlka=True` 时第二步为 `MLKABlock(C_i)`；`False` 时保留原始 `final_num_features` 逻辑 |
 | 创建 `nnUNetPlusPlusTrainerV2_MLKA` | ⬜ | 独立 trainer 显式传入 `use_mlka=True, mlka_norm='instance'` |
@@ -491,7 +491,7 @@ GSAU 仅作用于主跳跃连接（编码器特征 x^{i,0}），密集路径中�
 
 | 任务 | 状态 | 开始日期 | 完成日期 | 备注 |
 |------|:----:|----------|----------|------|
-| 改动一：创建 custom_modules/mlka.py | ⬜ 待开始 | — | — | 可配置 Norm + GroupGLKA + MLKABlock |
+| 改动一：创建 custom_modules/mlka.py | ✅ 已完成 | 2026-05-25 | 2026-05-25 | 可配置 Norm + GroupGLKA + MLKABlock，已包含 output_channels |
 | 改动一：generic_UNetPlusPlus.py 导入与参数 | ⬜ 待开始 | — | — | use_mlka, mlka_groups, mlka_norm='instance' |
 | 改动一：create_nest 条件分支改造 | ⬜ 待开始 | — | — | L466-473，第二步 C_i→C_i |
 | 改动一：创建 nnUNetPlusPlusTrainerV2_MLKA | ⬜ 待开始 | — | — | 独立 trainer，传入 use_mlka=True |
