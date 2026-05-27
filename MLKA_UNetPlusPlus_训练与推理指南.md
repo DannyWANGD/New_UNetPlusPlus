@@ -1,13 +1,13 @@
 # MLKA UNet++ 训练与推理指南
 
-本文档说明如何在 GPU 服务器上使用当前改动一：`nnUNetPlusPlusTrainerV2_MLKA`。
+本文档说明如何在 GPU 服务器上使用当前 UNet++ 改动版本，包括 `nnUNetPlusPlusTrainerV2_MLKA`、`nnUNetPlusPlusTrainerV2_GSAU` 与 `nnUNetPlusPlusTrainerV2_MLKA_GSAU`。
 
 ## 1. 当前支持范围
 
 | 项目 | 要求 |
 |------|------|
 | 网络 | 仅 `2d` |
-| Trainer | `nnUNetPlusPlusTrainerV2_MLKA` |
+| Trainer | `nnUNetPlusPlusTrainerV2_MLKA` / `nnUNetPlusPlusTrainerV2_GSAU` / `nnUNetPlusPlusTrainerV2_MLKA_GSAU` |
 | plans | 必须使用 `base_num_features=30` 的 2D plans |
 | 上采样 | 必须 `convolutional_upsampling=True` |
 | 拓扑 | 当前 `Generic_UNetPlusPlus.forward()` 固定 5-pool |
@@ -23,12 +23,42 @@
 cd /path/to/New_UNetPlusPlus
 ```
 
-创建环境并安装本仓库：
+### 2.1 一行命令创建 conda 环境并安装依赖
+
+推荐在仓库根目录下执行。下面命令会从新建 conda 环境开始，安装 PyTorch、项目依赖和当前仓库：
 
 ```bash
-conda create -n unetpp_mlka python=3.8 -y
+conda create -n unetpp_mlka python=3.9 -y && conda run -n unetpp_mlka python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118 && conda run -n unetpp_mlka python -m pip install -r requirements-unetpp.txt && conda run -n unetpp_mlka python -m pip install --no-deps -e ./pytorch
+```
+
+如果服务器 CUDA 版本不是 11.8，请把 `cu118` 替换为与你的服务器匹配的 PyTorch CUDA wheel，例如 `cu121`。如果只做 CPU 本地结构验证，可以去掉 `--index-url https://download.pytorch.org/whl/cu118`。
+
+`requirements-unetpp.txt` 不包含 `dicom2nifti`。原因是新版 `dicom2nifti` 在 Windows 上会拉取 `python-gdcm`，可能触发本地 CMake/GDCM 编译失败。若你需要把 DICOM 转为 NIfTI，可在环境建好后额外安装：
+
+```bash
+conda run -n unetpp_mlka python -m pip install dicom2nifti
+```
+
+如果你的数据已经是 nnU-Net 标准 NIfTI 格式，不需要安装它。
+
+安装本仓库时使用 `--no-deps -e ./pytorch`，是为了避免 `pytorch/setup.py` 中原始 nnU-Net 依赖再次拉取未固定版本的 `medpy` 或可选的 `dicom2nifti`。依赖以仓库根目录的 `requirements-unetpp.txt` 为准。
+
+Windows PowerShell 中也可以使用同样的一行命令，只是通常用分号分隔：
+
+```powershell
+conda create -n unetpp_mlka python=3.9 -y; conda run -n unetpp_mlka python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118; conda run -n unetpp_mlka python -m pip install -r requirements-unetpp.txt; conda run -n unetpp_mlka python -m pip install --no-deps -e ./pytorch
+```
+
+### 2.2 分步安装方式
+
+如果需要逐步排查环境问题，也可以分步执行：
+
+```bash
+conda create -n unetpp_mlka python=3.9 -y
 conda activate unetpp_mlka
-pip install -e ./pytorch
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements-unetpp.txt
+pip install --no-deps -e ./pytorch
 ```
 
 确认 PyTorch 可使用 GPU：
@@ -137,7 +167,7 @@ python -c "from batchgenerators.utilities.file_and_folder_operations import load
 
 ### 6.1 Baseline 训练（可选对照）
 
-Baseline 和 MLKA 是两个独立训练任务。Baseline 只用于做消融对照，不是运行 MLKA 的前置条件。两者会写入不同结果目录。
+Baseline、MLKA 和 GSAU 是独立训练任务。Baseline 只用于做消融对照，不是运行改进模型的前置条件。不同 trainer 会写入不同结果目录。
 
 如需对比原始 UNet++，运行：
 
@@ -175,6 +205,26 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_Task
 CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -val
 ```
 
+### 6.3 GSAU 训练
+
+仅训练 GSAU skip gate 消融组：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_GSAU TaskXXX_TaskName 0 -p nnUNetPlans
+```
+
+GSAU-only 本身不要求 `base_num_features` 必须能被 3 整除；但为了与 MLKA 和 Baseline 做公平消融，主实验仍建议统一使用 `ExperimentPlanner2D` 生成的 `base_num_features=30` plans。
+
+### 6.4 MLKA + GSAU 联合训练
+
+训练联合改进组：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA_GSAU TaskXXX_TaskName 0 -p nnUNetPlans
+```
+
+联合组包含 MLKA，因此仍必须使用 `base_num_features=30` 的 2D plans。
+
 ## 7. 推理
 
 推理输入目录必须只放待预测图像，命名仍为：
@@ -199,6 +249,18 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_predict \
 ```
 
 `-tr`、`-m`、`-p` 必须和训练时一致，否则会找不到模型目录或加载错误配置。
+
+如果推理 GSAU-only 模型，把 `-tr nnUNetPlusPlusTrainerV2_MLKA` 替换为：
+
+```bash
+-tr nnUNetPlusPlusTrainerV2_GSAU
+```
+
+如果推理 MLKA+GSAU 联合模型，替换为：
+
+```bash
+-tr nnUNetPlusPlusTrainerV2_MLKA_GSAU
+```
 
 自动使用已训练 folds：
 

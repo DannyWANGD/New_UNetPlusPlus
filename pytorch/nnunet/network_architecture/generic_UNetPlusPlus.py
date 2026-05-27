@@ -20,6 +20,7 @@ import torch
 import numpy as np
 from nnunet.network_architecture.initialization import InitWeights_He
 from nnunet.network_architecture.custom_modules.mlka import MLKABlock
+from nnunet.network_architecture.custom_modules.gsau import GSAU
 from nnunet.network_architecture.neural_network import SegmentationNetwork
 import torch.nn.functional
 
@@ -191,7 +192,8 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
                  conv_kernel_sizes=None,
                  upscale_logits=False, convolutional_pooling=False, convolutional_upsampling=False,
                  max_num_features=None, basic_block=ConvDropoutNormNonlin,
-                 seg_output_use_bias=False, use_mlka=False, mlka_groups=3, mlka_norm='instance'):
+                 seg_output_use_bias=False, use_mlka=False, mlka_groups=3, mlka_norm='instance',
+                 use_gsau=False, gsau_kernel_size=7, gsau_init_bias=2.0, gsau_weight_std=1e-3):
         """
         basically more flexible than v1, architecture is the same
 
@@ -208,6 +210,10 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         self.use_mlka = use_mlka
         self.mlka_groups = mlka_groups
         self.mlka_norm = mlka_norm
+        self.use_gsau = use_gsau
+        self.gsau_kernel_size = gsau_kernel_size
+        self.gsau_init_bias = gsau_init_bias
+        self.gsau_weight_std = gsau_weight_std
         if nonlin_kwargs is None:
             nonlin_kwargs = {'negative_slope': 1e-2, 'inplace': True}
         if dropout_op_kwargs is None:
@@ -332,6 +338,23 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
                               self.norm_op, self.norm_op_kwargs, self.dropout_op, self.dropout_op_kwargs, self.nonlin,
                               self.nonlin_kwargs, basic_block=basic_block)))
 
+        self.gsau_blocks = None
+        if self.use_gsau:
+            if not self.convolutional_upsampling:
+                raise NotImplementedError("GSAU skip gating currently requires convolutional_upsampling=True.")
+            if self.conv_op != nn.Conv2d:
+                raise NotImplementedError("GSAU skip gating currently supports 2D Conv2d only.")
+            gsau_channels = [self.conv_blocks_context[i].output_channels for i in range(num_pool)]
+            self.gsau_blocks = nn.ModuleList([
+                GSAU(
+                    channels,
+                    kernel_size=self.gsau_kernel_size,
+                    init_bias=self.gsau_init_bias,
+                    weight_std=self.gsau_weight_std,
+                )
+                for channels in gsau_channels
+            ])
+
         # if we don't want to do dropout in the localization pathway then we set the dropout prob to zero here
         if not dropout_in_localization:
             old_dropout_p = self.dropout_op_kwargs['p']
@@ -407,33 +430,48 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
         x0_0 = self.conv_blocks_context[0](x) # x0_0的维度是（B,C,H,W）
         x1_0 = self.conv_blocks_context[1](x0_0) # x1_0的维度是（B,C,H/2,W/2）
         # self.up4[0](x1_0)的维度是（B,C,H,W），所以torch.cat([x0_0, self.up4[0](x1_0)], 1)的维度是（B,2C,H,W），经过self.loc4[0]后x0_1的维度又变成了（B,C,H,W）
-        x0_1 = self.loc4[0](torch.cat([x0_0, self.up4[0](x1_0)], 1)) 
+        up_x1_0 = self.up4[0](x1_0)
+        x0_1 = self.loc4[0](torch.cat([self.apply_gsau(0, up_x1_0, x0_0), up_x1_0], 1)) 
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-1](x0_1)))
 
         x2_0 = self.conv_blocks_context[2](x1_0)
-        x1_1 = self.loc3[0](torch.cat([x1_0, self.up3[0](x2_0)], 1))
-        x0_2 = self.loc3[1](torch.cat([x0_0, x0_1, self.up3[1](x1_1)], 1))
+        up_x2_0 = self.up3[0](x2_0)
+        x1_1 = self.loc3[0](torch.cat([self.apply_gsau(1, up_x2_0, x1_0), up_x2_0], 1))
+        up_x1_1 = self.up3[1](x1_1)
+        x0_2 = self.loc3[1](torch.cat([self.apply_gsau(0, up_x1_1, x0_0), x0_1, up_x1_1], 1))
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-2](x0_2)))
 
         x3_0 = self.conv_blocks_context[3](x2_0)
-        x2_1 = self.loc2[0](torch.cat([x2_0, self.up2[0](x3_0)], 1))
-        x1_2 = self.loc2[1](torch.cat([x1_0, x1_1, self.up2[1](x2_1)], 1))
-        x0_3 = self.loc2[2](torch.cat([x0_0, x0_1, x0_2, self.up2[2](x1_2)], 1))
+        up_x3_0 = self.up2[0](x3_0)
+        x2_1 = self.loc2[0](torch.cat([self.apply_gsau(2, up_x3_0, x2_0), up_x3_0], 1))
+        up_x2_1 = self.up2[1](x2_1)
+        x1_2 = self.loc2[1](torch.cat([self.apply_gsau(1, up_x2_1, x1_0), x1_1, up_x2_1], 1))
+        up_x1_2 = self.up2[2](x1_2)
+        x0_3 = self.loc2[2](torch.cat([self.apply_gsau(0, up_x1_2, x0_0), x0_1, x0_2, up_x1_2], 1))
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-3](x0_3)))
 
         x4_0 = self.conv_blocks_context[4](x3_0)
-        x3_1 = self.loc1[0](torch.cat([x3_0, self.up1[0](x4_0)], 1))
-        x2_2 = self.loc1[1](torch.cat([x2_0, x2_1, self.up1[1](x3_1)], 1))
-        x1_3 = self.loc1[2](torch.cat([x1_0, x1_1, x1_2, self.up1[2](x2_2)], 1))
-        x0_4 = self.loc1[3](torch.cat([x0_0, x0_1, x0_2, x0_3, self.up1[3](x1_3)], 1))
+        up_x4_0 = self.up1[0](x4_0)
+        x3_1 = self.loc1[0](torch.cat([self.apply_gsau(3, up_x4_0, x3_0), up_x4_0], 1))
+        up_x3_1 = self.up1[1](x3_1)
+        x2_2 = self.loc1[1](torch.cat([self.apply_gsau(2, up_x3_1, x2_0), x2_1, up_x3_1], 1))
+        up_x2_2 = self.up1[2](x2_2)
+        x1_3 = self.loc1[2](torch.cat([self.apply_gsau(1, up_x2_2, x1_0), x1_1, x1_2, up_x2_2], 1))
+        up_x1_3 = self.up1[3](x1_3)
+        x0_4 = self.loc1[3](torch.cat([self.apply_gsau(0, up_x1_3, x0_0), x0_1, x0_2, x0_3, up_x1_3], 1))
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-4](x0_4)))
 
         x5_0 = self.conv_blocks_context[5](x4_0)
-        x4_1 = self.loc0[0](torch.cat([x4_0, self.up0[0](x5_0)], 1))
-        x3_2 = self.loc0[1](torch.cat([x3_0, x3_1, self.up0[1](x4_1)], 1))
-        x2_3 = self.loc0[2](torch.cat([x2_0, x2_1, x2_2, self.up0[2](x3_2)], 1))
-        x1_4 = self.loc0[3](torch.cat([x1_0, x1_1, x1_2, x1_3, self.up0[3](x2_3)], 1))
-        x0_5 = self.loc0[4](torch.cat([x0_0, x0_1, x0_2, x0_3, x0_4, self.up0[4](x1_4)], 1))
+        up_x5_0 = self.up0[0](x5_0)
+        x4_1 = self.loc0[0](torch.cat([self.apply_gsau(4, up_x5_0, x4_0), up_x5_0], 1))
+        up_x4_1 = self.up0[1](x4_1)
+        x3_2 = self.loc0[1](torch.cat([self.apply_gsau(3, up_x4_1, x3_0), x3_1, up_x4_1], 1))
+        up_x3_2 = self.up0[2](x3_2)
+        x2_3 = self.loc0[2](torch.cat([self.apply_gsau(2, up_x3_2, x2_0), x2_1, x2_2, up_x3_2], 1))
+        up_x2_3 = self.up0[3](x2_3)
+        x1_4 = self.loc0[3](torch.cat([self.apply_gsau(1, up_x2_3, x1_0), x1_1, x1_2, x1_3, up_x2_3], 1))
+        up_x1_4 = self.up0[4](x1_4)
+        x0_5 = self.loc0[4](torch.cat([self.apply_gsau(0, up_x1_4, x0_0), x0_1, x0_2, x0_3, x0_4, up_x1_4], 1))
         seg_outputs.append(self.final_nonlin(self.seg_outputs[-5](x0_5)))
 
         if self._deep_supervision and self.do_ds:
@@ -441,6 +479,13 @@ class Generic_UNetPlusPlus(SegmentationNetwork):
                                               zip(list(self.upscale_logits_ops)[::-1], seg_outputs[:-1][::-1])])
         else:
             return seg_outputs[-1]
+
+    def apply_gsau(self, level, gate_x, target_y):
+        if not self.use_gsau:
+            return target_y
+        if self.gsau_blocks is None:
+            raise RuntimeError("GSAU is enabled but gsau_blocks were not initialized.")
+        return self.gsau_blocks[level](gate_x, target_y)
 
     # now lets build the localization pathway BACK_UP
     def create_nest(self, z, num_pool, final_num_features, num_conv_per_stage,

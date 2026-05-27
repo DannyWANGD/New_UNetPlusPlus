@@ -1,0 +1,13 @@
+numpy==1.23.5
+scipy>=1.10,<1.11
+scikit-image>=0.24,<0.25
+scikit-learn>=1.6,<1.7
+pandas>=2.0,<2.1
+Pillow>=11.1
+tqdm>=4.67
+batchgenerators==0.25.2
+SimpleITK==2.5.5
+MedPy==0.4.0
+nibabel>=5.3
+tifffile>=2024.8.30
+future>=1.0.0

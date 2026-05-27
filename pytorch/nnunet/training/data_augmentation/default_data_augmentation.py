@@ -15,9 +15,20 @@
 from copy import deepcopy
 
 import numpy as np
-from batchgenerators.dataloading import MultiThreadedAugmenter, SingleThreadedAugmenter
-from batchgenerators.transforms import DataChannelSelectionTransform, SegChannelSelectionTransform, SpatialTransform, \
-    GammaTransform, MirrorTransform, Compose
+try:
+    from batchgenerators.dataloading import MultiThreadedAugmenter, SingleThreadedAugmenter
+except ImportError:
+    from batchgenerators.dataloading.multi_threaded_augmenter import MultiThreadedAugmenter
+    from batchgenerators.dataloading.single_threaded_augmenter import SingleThreadedAugmenter
+try:
+    from batchgenerators.transforms import DataChannelSelectionTransform, SegChannelSelectionTransform, SpatialTransform, \
+        GammaTransform, MirrorTransform, Compose
+except ImportError:
+    from batchgenerators.transforms.abstract_transforms import Compose
+    from batchgenerators.transforms.channel_selection_transforms import DataChannelSelectionTransform, \
+        SegChannelSelectionTransform
+    from batchgenerators.transforms.color_transforms import GammaTransform
+    from batchgenerators.transforms.spatial_transforms import MirrorTransform, SpatialTransform
 from batchgenerators.transforms.color_transforms import BrightnessMultiplicativeTransform, \
     ContrastAugmentationTransform, BrightnessTransform
 from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform, GaussianBlurTransform
