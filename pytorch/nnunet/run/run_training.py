@@ -35,6 +35,19 @@ def main():
     parser.add_argument("-w", required=False, default=None, help="Load pre-trained Models Genesis")
     parser.add_argument("-c", "--continue_training", help="use this if you want to continue a training",
                         action="store_true")
+    parser.add_argument("--continue_from", "--resume_from", dest="continue_from", required=False,
+                        choices=("auto", "latest", "best", "final"), default=None,
+                        help="checkpoint to resume when continuing training. auto keeps the legacy priority "
+                             "final -> latest -> best")
+    parser.add_argument("--continue_from_checkpoint", "--resume_from_checkpoint",
+                        dest="continue_from_checkpoint", required=False, default=None,
+                        help="path to a .model checkpoint to resume from. This implies --continue_training")
+    parser.add_argument("--early_stopping_patience", required=False, default=None, type=int,
+                        help="enable validation-based early stopping with this patience in epochs")
+    parser.add_argument("--early_stopping_start_epoch", required=False, default=0, type=int,
+                        help="epoch from which early stopping is allowed to stop training")
+    parser.add_argument("--early_stopping_min_delta", required=False, default=0.0, type=float,
+                        help="minimum improvement in the validation moving average required to reset early stopping")
     parser.add_argument("-p", help="plans identifier. Only change this if you created a custom experiment planner",
                         default=default_plans_identifier, required=False)
     parser.add_argument("--use_compressed_data", default=False, action="store_true",
@@ -86,6 +99,8 @@ def main():
 
     deterministic = args.deterministic
     valbest = args.valbest
+    continue_from = args.continue_from
+    continue_from_checkpoint = args.continue_from_checkpoint
 
     fp32 = args.fp32
     run_mixed_precision = not fp32
@@ -134,6 +149,19 @@ def main():
                             fp16=run_mixed_precision)
 
     trainer.initialize(not validation_only)
+
+    if args.early_stopping_patience is not None:
+        if args.early_stopping_patience < 1:
+            raise ValueError("--early_stopping_patience must be >= 1")
+        if args.early_stopping_start_epoch < 0:
+            raise ValueError("--early_stopping_start_epoch must be >= 0")
+        trainer.use_early_stopping = True
+        trainer.early_stopping_patience = args.early_stopping_patience
+        trainer.early_stopping_start_epoch = args.early_stopping_start_epoch
+        trainer.early_stopping_min_delta = args.early_stopping_min_delta
+        trainer.print_to_log_file("validation early stopping enabled: patience=%d, start_epoch=%d, min_delta=%g" %
+                                  (trainer.early_stopping_patience, trainer.early_stopping_start_epoch,
+                                   trainer.early_stopping_min_delta))
     
     if weights != None:                                                         
         trainer.load_pretrained_encoder_weights(weights)
@@ -143,8 +171,40 @@ def main():
         trainer.find_lr()
     else:
         if not validation_only:
-            if args.continue_training:
-                trainer.load_latest_checkpoint()
+            should_continue_training = args.continue_training or continue_from is not None or \
+                                       continue_from_checkpoint is not None
+            if should_continue_training:
+                if continue_from_checkpoint is not None:
+                    if not isfile(continue_from_checkpoint):
+                        raise RuntimeError("checkpoint not found: %s" % continue_from_checkpoint)
+                    trainer.load_checkpoint(continue_from_checkpoint)
+                else:
+                    if continue_from is None or continue_from == "auto":
+                        existing_checkpoints = [
+                            join(trainer.output_folder, "model_final_checkpoint.model"),
+                            join(trainer.output_folder, "model_latest.model"),
+                            join(trainer.output_folder, "model_best.model"),
+                        ]
+                        if any(isfile(i) for i in existing_checkpoints):
+                            trainer.load_latest_checkpoint()
+                        else:
+                            trainer.print_to_log_file("WARNING! --continue_training was requested, but no checkpoint "
+                                                      "was found. Starting training from scratch.")
+                    else:
+                        checkpoint_files = {
+                            "latest": "model_latest.model",
+                            "best": "model_best.model",
+                            "final": "model_final_checkpoint.model",
+                        }
+                        checkpoint = join(trainer.output_folder, checkpoint_files[continue_from])
+                        if not isfile(checkpoint):
+                            if continue_from == "latest":
+                                trainer.print_to_log_file("WARNING! latest checkpoint not found: %s. Starting "
+                                                          "training from scratch." % checkpoint)
+                            else:
+                                raise RuntimeError("%s checkpoint not found: %s" % (continue_from, checkpoint))
+                        else:
+                            trainer.load_checkpoint(checkpoint)
             trainer.run_training()
         else:
             if valbest:

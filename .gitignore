@@ -99,3 +99,25 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# Local IDE/index files
+.vscode/
+*.code-workspace
+
+# Local datasets, nnU-Net preprocessing output, training output
+data/
+nnUNet_raw_data_base/
+nnUNet_preprocessed/
+nnUNet_results/
+RESULTS_FOLDER/
+
+# Model checkpoints and generated medical-imaging artifacts
+*.model
+*.model.pkl
+*.nii.gz
+*.npz
+*.npy
+
+# nnU-Net training artifacts
+training_log_*.txt
+progress.png

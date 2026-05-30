@@ -129,9 +129,21 @@ CUDA_VISIBLE_DEVICES=$GPU nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA_GSAU $TAS
 $RESULTS/nnUNet/2d/$TASK_NAME/<TrainerName>__nnUNetPlans/fold_0/
 ```
 
+可选早停。默认仍按 nnU-Net++ 原逻辑训练到 `max_num_epochs`；只有追加 `--early_stopping_patience` 才启用基于验证指标的早停：
+
+```bash
+CUDA_VISIBLE_DEVICES=$GPU nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA $TASK_NAME 0 -p nnUNetPlans --early_stopping_patience 80 --early_stopping_start_epoch 100
+```
+
+从已有 checkpoint 继续训练：
+
+```bash
+CUDA_VISIBLE_DEVICES=$GPU nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA $TASK_NAME 0 -p nnUNetPlans -c --continue_from latest
+```
+
 ### 0.7 正式 5 折训练
 
-正式消融建议 5 折都跑，并保持四组完全相同的数据、plans、fold、TTA 设置。
+正式消融建议 5 折都跑，并保持四组完全相同的数据、plans、fold、早停规则和 TTA 设置。
 
 ```bash
 for FOLD in 0 1 2 3 4; do
@@ -418,10 +430,10 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_Task
 | `0` | 第 0 折，可改为 `1..4` 或 `all` |
 | `-p nnUNetPlans` | 使用 `ExperimentPlanner2D` 生成的 30 通道 plans |
 
-继续训练：
+继续训练。推荐明确指定恢复哪个 checkpoint：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -c
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -c --continue_from latest
 ```
 
 只做验证：
@@ -430,7 +442,48 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_Task
 CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -val
 ```
 
-### 6.3 GSAU 训练
+### 6.3 早停与恢复训练
+
+默认训练行为不变：`nnUNetPlusPlusTrainerV2` 系列会训练到 trainer 中设置的 `max_num_epochs`。只有传入 `--early_stopping_patience` 时，才启用早停。
+
+早停监控验证 Dice 的 moving average；如果当前 trainer 没有在线 Dice 指标，则退回监控负验证 loss。示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans --early_stopping_patience 80 --early_stopping_start_epoch 100
+```
+
+| 参数 | 含义 |
+|------|------|
+| `--early_stopping_patience 80` | 验证指标连续 80 个 epoch 未改善后，再下一个 epoch 停止 |
+| `--early_stopping_start_epoch 100` | 日志中的 `epoch` 小于 `100` 时不允许早停 |
+| `--early_stopping_min_delta 0.001` | 只有改善超过该阈值才重置 patience；不写则为 `0.0` |
+
+恢复训练有三种常用方式：
+
+```bash
+# 继续最近的周期性 checkpoint，适合中断后恢复
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -c --continue_from latest
+
+# 从验证表现最好的 checkpoint 继续
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans -c --continue_from best
+
+# 从指定 .model 文件继续
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans --continue_from_checkpoint /path/to/model_latest.model
+```
+
+`-c` 不带 `--continue_from` 时使用旧逻辑：优先加载 `model_final_checkpoint.model`，其次 `model_latest.model`，最后 `model_best.model`。如果三者都不存在，会打印 warning 并从头训练。
+
+如果是训练中断后恢复，通常更推荐 `-c --continue_from latest`。若 `model_latest.model` 不存在，也会打印 warning 并从头训练。`--continue_from best`、`--continue_from final` 和 `--continue_from_checkpoint /path/to/model.model` 仍会在找不到文件时报错，用于避免明确指定的路径被静默忽略。
+
+`--continue_from_checkpoint` 和 `--continue_from latest/best/final` 加载的是完整训练 checkpoint，包括模型参数、优化器状态、epoch、AMP scaler 和早停状态。`-w` 不是断点续训，它只加载外部预训练 encoder 权重。
+
+训练和验证进度条默认开启。如需关闭：
+
+```bash
+export nnunet_use_progress_bar=0
+```
+
+### 6.4 GSAU 训练
 
 仅训练 GSAU skip gate 消融组：
 
@@ -440,7 +493,7 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_GSAU TaskXXX_Task
 
 GSAU-only 本身不要求 `base_num_features` 必须能被 3 整除；但为了与 MLKA 和 Baseline 做公平消融，主实验仍建议统一使用 `ExperimentPlanner2D` 生成的 `base_num_features=30` plans。
 
-### 6.4 MLKA + GSAU 联合训练
+### 6.5 MLKA + GSAU 联合训练
 
 训练联合改进组：
 
@@ -450,7 +503,7 @@ CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA_GSAU TaskXXX
 
 联合组包含 MLKA，因此仍必须使用 `base_num_features=30` 的 2D plans。
 
-### 6.5 训练后的验证与后处理
+### 6.6 训练后的验证与后处理
 
 `nnUNet_train` 在训练结束后会自动运行一次 validation，并把验证集预测写到当前 fold 目录下。若只想基于已有 checkpoint 重新验证，可运行：
 
@@ -553,6 +606,8 @@ $RESULTS_FOLDER/nnUNet/2d/TaskXXX_TaskName/nnUNetPlusPlusTrainerV2_MLKA_GSAU__nn
 fold_0/
 ├── model_final_checkpoint.model
 ├── model_final_checkpoint.model.pkl
+├── model_latest.model              # 训练中周期性保存；训练正常结束后通常会被删除
+├── model_latest.model.pkl
 ├── model_best.model
 ├── model_best.model.pkl
 ├── debug.json
@@ -564,6 +619,8 @@ fold_0/
 ```
 
 trainer 根目录通常还会有 `plans.pkl`。如果做了 5 折后处理汇总，还会有 `postprocessing.json`、`cv_niftis_raw/` 和 `cv_niftis_postprocessed/`。推理脚本会从 trainer 根目录读取 `plans.pkl`，并优先使用 trainer 根目录的 `postprocessing.json`；如果根目录没有 `postprocessing.json`，推理不会中断，但会提示缺少后处理并输出 raw mask。
+
+`model_latest.model` 是训练中按 `save_every` 周期保存的临时续训点，默认每 50 个 epoch 保存一次；训练正常结束后，nnU-Net 会保存 `model_final_checkpoint.model` 并删除 `model_latest.model`。因此刚开始训练、还没到保存间隔，或已经正常训练结束时，目录里可能没有 `model_latest.model`。
 
 验证输出通常位于：
 
@@ -628,6 +685,7 @@ pred_mlka/
 6. 推理时的 `-tr` 和 `-p` 必须与训练时一致。
 7. 原始 baseline 使用 `nnUNetPlusPlusTrainerV2`；MLKA 使用 `nnUNetPlusPlusTrainerV2_MLKA`，不要混用结果目录。
 8. 新增 trainer 文件 `nnUNetPlusPlusTrainerV2_MLKA.py`、`nnUNetPlusPlusTrainerV2_GSAU.py`、`nnUNetPlusPlusTrainerV2_MLKA_GSAU.py` 必须同步到 GPU 服务器。
+9. 若启用早停，四组消融应使用完全相同的早停参数，并在实验记录中说明每组实际停止的 epoch。
 
 ## 10. 常见错误
 
@@ -663,6 +721,18 @@ python -c "from nnunet.training.network_training.nnUNetPlusPlusTrainerV2_MLKA im
 原因：nnU-Net 环境变量未设置。
 
 处理：重新设置 `nnUNet_raw_data_base`、`nnUNet_preprocessed`、`RESULTS_FOLDER`。
+
+### `train loss` 或 `validation loss` 是负数
+
+这是正常现象。当前 Dice loss 实现返回的是负 Dice，loss 变成负数不代表训练错误。
+
+### 第 0 个 epoch 出现 `train loss : nan`
+
+如果只在第 0 个 epoch 出现一次，后续恢复为有限值，可以继续观察；如果重复出现或验证指标异常，建议重启训练并关闭 AMP：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 nnUNet_train 2d nnUNetPlusPlusTrainerV2_MLKA TaskXXX_TaskName 0 -p nnUNetPlans --fp32
+```
 
 ### 推理找不到模型目录
 
@@ -700,7 +770,7 @@ $RESULTS_FOLDER/nnUNet/2d/TaskXXX_TaskName/<TrainerName>__nnUNetPlans/fold_0/
 2. `labelsTr/caseID.nii.gz` 的空间尺寸、spacing、方向应与 `imagesTr/caseID_0000.nii.gz` 对齐。
 3. 标签值必须是整数，且与 `dataset.json` 的 `labels` 对应；背景为 `0`。
 4. `nnUNetPlans_plans_2D.pkl` 的 `base_num_features` 必须为 `30`，否则不要训练 MLKA 或 MLKA+GSAU。
-5. 四组消融必须使用同一 Task、同一 plans、同一 fold、同一训练轮数和同一推理 TTA 设置。
+5. 四组消融必须使用同一 Task、同一 plans、同一 fold、同一最大训练轮数或同一早停规则，以及同一推理 TTA 设置。
 6. 推理目录中每个 case 必须按训练模态数完整提供，例如单模态为 `case101_0000.nii.gz`，四模态为 `case101_0000.nii.gz` 到 `case101_0003.nii.gz`。
 
 预期结果形态不是“一个图片文件”，而是一组可追踪产物：训练日志和曲线、模型 checkpoint、验证集 `.nii.gz` mask、验证 `summary.json`，以及独立推理目录下的测试 `.nii.gz` mask。真正支撑论文结论的是四组消融在相同数据划分上的 `summary.json` 指标和对应 mask，可视化图只作为辅助展示。

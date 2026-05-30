@@ -89,6 +89,12 @@ class NetworkTrainer(object):
 
         ################# THESE DO NOT NECESSARILY NEED TO BE MODIFIED #####################
         self.patience = 50
+        self.use_early_stopping = False
+        self.early_stopping_patience = self.patience
+        self.early_stopping_start_epoch = 0
+        self.early_stopping_min_delta = 0.0
+        self.early_stopping_best_epoch = None
+        self.early_stopping_best_val_eval_criterion_MA = None
         self.val_eval_criterion_alpha = 0.9  # alpha * old + (1-alpha) * new
         # if this is too low then the moving average will be too noisy and the training may terminate early. If it is
         # too high the training will take forever
@@ -114,9 +120,7 @@ class NetworkTrainer(object):
         self.log_file = None
         self.deterministic = deterministic
 
-        self.use_progress_bar = False
-        if 'nnunet_use_progress_bar' in os.environ.keys():
-            self.use_progress_bar = bool(int(os.environ['nnunet_use_progress_bar']))
+        self.use_progress_bar = bool(int(os.environ.get('nnunet_use_progress_bar', '1')))
 
         ################# Settings for saving checkpoints ##################################
         self.save_every = 50
@@ -279,7 +283,16 @@ class NetworkTrainer(object):
             'optimizer_state_dict': optimizer_state_dict,
             'lr_scheduler_state_dict': lr_sched_state_dct,
             'plot_stuff': (self.all_tr_losses, self.all_val_losses, self.all_val_losses_tr_mode,
-                           self.all_val_eval_metrics)}
+                           self.all_val_eval_metrics),
+            'training_state': {
+                'val_eval_criterion_MA': self.val_eval_criterion_MA,
+                'train_loss_MA': self.train_loss_MA,
+                'best_val_eval_criterion_MA': self.best_val_eval_criterion_MA,
+                'best_MA_tr_loss_for_patience': self.best_MA_tr_loss_for_patience,
+                'best_epoch_based_on_MA_tr_loss': self.best_epoch_based_on_MA_tr_loss,
+                'early_stopping_best_epoch': self.early_stopping_best_epoch,
+                'early_stopping_best_val_eval_criterion_MA': self.early_stopping_best_val_eval_criterion_MA,
+            }}
         if self.amp_grad_scaler is not None:
             save_this['amp_grad_scaler'] = self.amp_grad_scaler.state_dict()
 
@@ -422,6 +435,20 @@ class NetworkTrainer(object):
         self.all_tr_losses, self.all_val_losses, self.all_val_losses_tr_mode, self.all_val_eval_metrics = checkpoint[
             'plot_stuff']
 
+        training_state = checkpoint.get('training_state', {})
+        self.val_eval_criterion_MA = training_state.get('val_eval_criterion_MA', self.val_eval_criterion_MA)
+        self.train_loss_MA = training_state.get('train_loss_MA', self.train_loss_MA)
+        self.best_val_eval_criterion_MA = training_state.get('best_val_eval_criterion_MA',
+                                                             self.best_val_eval_criterion_MA)
+        self.best_MA_tr_loss_for_patience = training_state.get('best_MA_tr_loss_for_patience',
+                                                               self.best_MA_tr_loss_for_patience)
+        self.best_epoch_based_on_MA_tr_loss = training_state.get('best_epoch_based_on_MA_tr_loss',
+                                                                 self.best_epoch_based_on_MA_tr_loss)
+        self.early_stopping_best_epoch = training_state.get('early_stopping_best_epoch',
+                                                            self.early_stopping_best_epoch)
+        self.early_stopping_best_val_eval_criterion_MA = training_state.get(
+            'early_stopping_best_val_eval_criterion_MA', self.early_stopping_best_val_eval_criterion_MA)
+
         # after the training is done, the epoch is incremented one more time in my old code. This results in
         # self.epoch = 1001 for old trained models when the epoch is actually 1000. This causes issues because
         # len(self.all_tr_losses) = 1000 and the plot function will fail. We can easily detect and correct that here
@@ -469,6 +496,7 @@ class NetworkTrainer(object):
         if not self.was_initialized:
             self.initialize(True)
 
+        training_stopped_by_epoch_end = False
         while self.epoch < self.max_num_epochs:
             self.print_to_log_file("\nepoch: ", self.epoch)
             epoch_start_time = time()
@@ -498,9 +526,17 @@ class NetworkTrainer(object):
                 # validation with train=False
                 self.network.eval()
                 val_losses = []
-                for b in range(self.num_val_batches_per_epoch):
-                    l = self.run_iteration(self.val_gen, False, True)
-                    val_losses.append(l)
+                if self.use_progress_bar:
+                    with trange(self.num_val_batches_per_epoch, leave=False) as tbar:
+                        for b in tbar:
+                            tbar.set_description("Val {}/{}".format(self.epoch + 1, self.max_num_epochs))
+                            l = self.run_iteration(self.val_gen, False, True)
+                            tbar.set_postfix(loss=l)
+                            val_losses.append(l)
+                else:
+                    for b in range(self.num_val_batches_per_epoch):
+                        l = self.run_iteration(self.val_gen, False, True)
+                        val_losses.append(l)
                 self.all_val_losses.append(np.mean(val_losses))
                 self.print_to_log_file("validation loss: %.4f" % self.all_val_losses[-1])
 
@@ -508,9 +544,17 @@ class NetworkTrainer(object):
                     self.network.train()
                     # validation with train=True
                     val_losses = []
-                    for b in range(self.num_val_batches_per_epoch):
-                        l = self.run_iteration(self.val_gen, False)
-                        val_losses.append(l)
+                    if self.use_progress_bar:
+                        with trange(self.num_val_batches_per_epoch, leave=False) as tbar:
+                            for b in tbar:
+                                tbar.set_description("Val(train) {}/{}".format(self.epoch + 1, self.max_num_epochs))
+                                l = self.run_iteration(self.val_gen, False)
+                                tbar.set_postfix(loss=l)
+                                val_losses.append(l)
+                    else:
+                        for b in range(self.num_val_batches_per_epoch):
+                            l = self.run_iteration(self.val_gen, False)
+                            val_losses.append(l)
                     self.all_val_losses_tr_mode.append(np.mean(val_losses))
                     self.print_to_log_file("validation loss (train=True): %.4f" % self.all_val_losses_tr_mode[-1])
 
@@ -522,12 +566,14 @@ class NetworkTrainer(object):
 
             if not continue_training:
                 # allows for early stopping
+                training_stopped_by_epoch_end = True
                 break
 
             self.epoch += 1
             self.print_to_log_file("This epoch took %f s\n" % (epoch_end_time - epoch_start_time))
 
-        self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
+        if not training_stopped_by_epoch_end:
+            self.epoch -= 1  # if we don't do this we can get a problem with loading model_final_checkpoint.
 
         if self.save_final_checkpoint: self.save_checkpoint(join(self.output_folder, "model_final_checkpoint.model"))
         # now we can delete latest as it will be identical with final
@@ -637,6 +683,38 @@ class NetworkTrainer(object):
 
         return continue_training
 
+    def manage_early_stopping(self):
+        if not self.use_early_stopping:
+            return True
+
+        if self.epoch < self.early_stopping_start_epoch:
+            return True
+
+        current = self.val_eval_criterion_MA
+        if current is None or not np.isfinite(current):
+            self.print_to_log_file("early stopping skipped this epoch because validation criterion is not finite:",
+                                   current)
+            return True
+
+        if self.early_stopping_best_epoch is None or self.early_stopping_best_val_eval_criterion_MA is None or \
+                current > self.early_stopping_best_val_eval_criterion_MA + self.early_stopping_min_delta:
+            self.early_stopping_best_val_eval_criterion_MA = current
+            self.early_stopping_best_epoch = self.epoch
+            self.print_to_log_file("early stopping new best validation criterion MA: %.6f at epoch %d" %
+                                   (current, self.epoch))
+            return True
+
+        epochs_without_improvement = self.epoch - self.early_stopping_best_epoch
+        self.print_to_log_file("early stopping patience: %d/%d" %
+                               (epochs_without_improvement, self.early_stopping_patience))
+
+        if epochs_without_improvement > self.early_stopping_patience:
+            self.print_to_log_file("early stopping triggered: validation criterion MA did not improve for %d epochs" %
+                                   epochs_without_improvement)
+            return False
+
+        return True
+
     def on_epoch_end(self):
         self.finish_online_evaluation()  # does not have to do anything, but can be used to update self.all_val_eval_
         # metrics
@@ -650,6 +728,8 @@ class NetworkTrainer(object):
         self.update_eval_criterion_MA()
 
         continue_training = self.manage_patience()
+        if self.use_early_stopping:
+            continue_training = continue_training and self.manage_early_stopping()
         return continue_training
 
     def update_train_loss_MA(self):

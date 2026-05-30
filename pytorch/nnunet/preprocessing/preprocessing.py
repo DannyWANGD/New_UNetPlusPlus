@@ -121,7 +121,9 @@ def resample_data_or_seg(data, new_shape, is_seg, axis=None, order=3, do_separat
     """
     assert len(data.shape) == 4, "data must be (c, x, y, z)"
     if is_seg:
-        resize_fn = resize_segmentation
+        def resize_fn(segmentation, target_shape, resize_order, cval=0, **kwargs):
+            return resize_segmentation(segmentation, target_shape, resize_order)
+
         kwargs = OrderedDict()
     else:
         resize_fn = resize
